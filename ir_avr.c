@@ -1,17 +1,12 @@
 
-
 #define F_CPU 8000000UL
-#define TRANSMISSION_MAX_LEN 32
-#define SIG_LONG_INTRVL 5
 
 #include <avr/io.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
 #include <avr/power.h>
 #include "USART.h"
-#include <stdio.h>
 #include <stdint.h>
-#include <ctype.h>
 #define CFREQ_US 15         // sampling frequency in us
 #define GAPTIME_US 20000    // gaptime in us (min. high time after IR command)
 
@@ -39,17 +34,18 @@ if sign. switches to low after short hightime => 1
 
 // 
 
+// This flag is set when IR signal is detected (transition to LOW)
+// and will be unset when signal stop condition triggered (20+ ms HIGH)
 int irTransmissionInProgress = 0;
-int transLength = 0;
-// Constantly write to this variable, and validate against known pattern (long low+longish high ... data ... long high)
-uint64_t transmission = 0;
-uint32_t lastTransmission = 0;
-uint16_t lastRisingEdgeTimeStep = 0;
-uint16_t TCNT11 = 0;
-uint64_t SHIFTMASK64 = (1 << 63);
+uint32_t transmission = 0;            // Build a bitstream from IR Recv. digital input
+uint32_t lastTransmission = 0;        // Save IR command into clean variable
+uint16_t lastRisingEdgeTimeStep = 0;  // Used to calculate pulse high-time
+// Increment this pseudo-timer everytime TCNT1 ticks (different condition for overflow!)
+uint16_t TCNT11 = 0;    
+uint32_t SHIFTMASK32 = (1 << 31);  // Used to unset 32-bit MSB
 
-uint64_t test = 0;
 
+// Used to debug 64 bit ints
 void print64Byte(int64_t num){
     for (int i = 64-1; i >= 0; i--){
         if ((num >> i) % 2 == 1){
@@ -64,22 +60,28 @@ void print64Byte(int64_t num){
 
 // Pin change interrupt (PORTD)
 ISR(PCINT2_vect){
-    //PORTB ^= (1 << PB0);
     if (!(PIND & (1 << PD2))){ // falling edge
         if (!irTransmissionInProgress){
+            // First falling edge signaling start of IR code transmission
             irTransmissionInProgress = 1;
         } else {
-            transmission = ((transmission & ~(SHIFTMASK64)) << 1);
+            // Shift left so that new bit can be stored in LSB
+            // Need to clear MSB before shifting so it doesn't overflow potentially
+            // Hence SHIFTMASK32 here
+            transmission = ((transmission & ~(SHIFTMASK32)) << 1);
+            // If signal has stayed high for a certain interval, it's a 1
             if(TCNT11 - lastRisingEdgeTimeStep > 100){
                 transmission |= 1;
-                printString("1");
+                //printString("1");
             } else {
                 // else LSB remains 0
-                printString("0");
+                //printString("0");
             } 
         }
     } else {
         if (irTransmissionInProgress){
+            // Rising edge, just save this timestep so next time a falling edge is detected, pulse time can be calculated
+            // (current_time - lastRisingEdgeTimeStep) == pulse_time
             lastRisingEdgeTimeStep = TCNT11;
         }
     }
@@ -89,7 +91,6 @@ ISR(PCINT2_vect){
 ISR(PCINT1_vect){
     if (PINC & (1 << PC5)){
         printString("\r\n");
-
         print64Byte(lastTransmission);
         printString("\r\n");
         printByte(lastTransmission);
@@ -100,18 +101,15 @@ ISR(PCINT1_vect){
 
 // Timer 1 has overflown, check if transmission ready (or not started at all)
 ISR(TIMER1_COMPA_vect){
-    PORTB ^= (1 << PB0);
+    //PORTB ^= (1 << PB0); // test timer frequency
     if (irTransmissionInProgress){
+        // Increment pseudo-timer when IR transmission is in progress
         TCNT11++;
+        // Check if IR signal transmission is finished (if HIGH for at least GAPTIME) 
         if (TCNT11 - lastRisingEdgeTimeStep > GAPTIME_US/CFREQ_US - 10){
-            //printString("Gap time exceeded\r\n");
-            //printString("Transmission 8LSB: ");
-            //printBinaryByte((int8_t) (transmission & 0xFF));
-            //printBinaryByte((int8_t) ((transmission)));
+            // reset all vars but keep "transmission" in "lastTransmission"
             lastRisingEdgeTimeStep = 0;
             TCNT11 = 0;
-            // Will transition into a 32bit var...first bit will disappear (always 1)
-            // Maybe just use 32bit everywhere...first (33th) bit will disappear anyway when shifting 
             lastTransmission = transmission;
             transmission = 0;
             irTransmissionInProgress = 0;
@@ -122,21 +120,21 @@ ISR(TIMER1_COMPA_vect){
 // Setup and enable timer
 void initTimer(){
     TCCR1B |= (1 << WGM12); // Configure timer 1 for CTC mode
-    TCCR1B |= (1 << CS11) | (1 << CS10) ; // Start timer at Fcpu/256 = 31,25 kHz
+    TCCR1B |= (1 << CS11) | (1 << CS10) ; // Start timer at Fcpu/64
     TIMSK1 |= (1 << OCIE1A); // overflow interrupt enable
-    OCR1A = 1;
-    //OCR1A = 334;
+    OCR1A = 1;               // overflow every tick, another variable will track ticks...
 }
 
 void initPinChangeIntr(){
-    // Set falling edge interrupt on INT0 (PD2)
-    DDRD &= ~(1 << PD2);  // INT0 as input
-    PCICR |= (1<<PCIE2);  // Enable Port D interrupts (PC2)
+    // Set edge detection interrupt on INT0 (PD2)
+    DDRD &= ~(1 << PD2);    // INT0 as input
+    PCICR |= (1<<PCIE2);    // Enable Port D interrupts (PC2)
     PCMSK2 |= (1<<PCINT18); 
 }
 
+// Used to print stuff on command when debugging
 void initDebugButton(){
-    DDRC &= ~(1 << PC5); // debug button
+    DDRC &= ~(1 << PC5);
     PORTC |= (1 << PC5);
     PCICR |= (1<<PCIE1);
     PCMSK1 |= (1<<PCINT13); 
@@ -144,9 +142,8 @@ void initDebugButton(){
 
 int main(void) {
     initDebugButton();
-    clock_prescale_set(clock_div_1);
+    clock_prescale_set(clock_div_1);  // 8 MHz
     initUSART();
-    printString("\r\n\r\n");
     DDRB |= (1 << PB0);
     initTimer();
     initPinChangeIntr();
