@@ -1,12 +1,10 @@
 
-#define F_CPU 8000000UL
-
-#include <avr/io.h>
+/* #include <avr/io.h>
 #include <util/delay.h>
-#include <avr/interrupt.h>
 #include <avr/power.h>
-#include "USART.h"
-#include <stdint.h>
+#include "USART.h" */
+#include <stdint.h> 
+#include <avr/interrupt.h>
 #define CFREQ_US 15         // sampling frequency in us
 #define GAPTIME_US 20000    // gaptime in us (min. high time after IR command)
 
@@ -23,16 +21,12 @@ WAIT FOR SIGNAL    sign.start        signal         signal ended (gap time befor
 ———————————————————___________—————_—_——_——_—_——_——_————————...
 low time seems to be 600us, 1,667 kHz
 high time is either <600us or 1600us
-sample with 1024 prescaler, should be safe enough - that's 7,8125 kHz
-if sign. switches to low after long hightime => 0
-if sign. switches to low after short hightime => 1
+if sign. switches to low after long hightime => 1
+if sign. switches to low after short hightime => 0
 
 // 25 ms (+gap time) = 45ms duration of signal
 45ms / 2^16 = 0,68 us samples
-
 */
-
-// 
 
 // This flag is set when IR signal is detected (transition to LOW)
 // and will be unset when signal stop condition triggered (20+ ms HIGH)
@@ -41,6 +35,7 @@ uint32_t transmission = 0;            // Build a bitstream from IR Recv. digital
 uint32_t lastTransmission = 0;        // Save IR command into clean variable
 uint16_t lastRisingEdgeTimeStep = 0;  // Used to calculate pulse high-time
 // Increment this pseudo-timer everytime TCNT1 ticks (different condition for overflow!)
+// Also, reset when signal finishes, start only when a new signal has started transmitting
 uint16_t TCNT11 = 0;    
 uint32_t SHIFTMASK32 = (1 << 31);  // Used to unset 32-bit MSB
 
@@ -101,7 +96,8 @@ ISR(PCINT1_vect){
 
 // Timer 1 has overflown, check if transmission ready (or not started at all)
 ISR(TIMER1_COMPA_vect){
-    //PORTB ^= (1 << PB0); // test timer frequency
+    DDRB = 1;
+    PORTB ^= (1 << PB0); // test timer frequency
     if (irTransmissionInProgress){
         // Increment pseudo-timer when IR transmission is in progress
         TCNT11++;
@@ -113,16 +109,23 @@ ISR(TIMER1_COMPA_vect){
             lastTransmission = transmission;
             transmission = 0;
             irTransmissionInProgress = 0;
+            
         }
     }
 }
 
 // Setup and enable timer
-void initTimer(){
+void initTimer(void){
     TCCR1B |= (1 << WGM12); // Configure timer 1 for CTC mode
     TCCR1B |= (1 << CS11) | (1 << CS10) ; // Start timer at Fcpu/64
     TIMSK1 |= (1 << OCIE1A); // overflow interrupt enable
     OCR1A = 1;               // overflow every tick, another variable will track ticks...
+}
+
+void stopTimer(void){
+    TCCR1B = 0;
+    TIMSK1 = 0;
+    OCR1A = 0;
 }
 
 void initPinChangeIntr(){
@@ -132,25 +135,40 @@ void initPinChangeIntr(){
     PCMSK2 |= (1<<PCINT18); 
 }
 
+void stopPinChangeIntr(){  
+    PCICR = 0; 
+    PCMSK2 = 0;
+}
+
 // Used to print stuff on command when debugging
-void initDebugButton(){
+/* void initDebugButton(){
     DDRC &= ~(1 << PC5);
     PORTC |= (1 << PC5);
     PCICR |= (1<<PCIE1);
     PCMSK1 |= (1<<PCINT13); 
-}
+} */
 
-int main(void) {
-    initDebugButton();
-    clock_prescale_set(clock_div_1);  // 8 MHz
-    initUSART();
-    DDRB |= (1 << PB0);
+void IRSetup(void){
     initTimer();
     initPinChangeIntr();
-    
-    sei();  // Set the global interrupt enable bit
-    
-    while(1){
-    }                                                  
-  return 0;                           
+    sei();
+}
+
+uint32_t IRListen(uint8_t timeout){
+    /* initTimer();
+    initPinChangeIntr();
+    sei(); */
+    int32_t retTransmission;
+    for (uint32_t i = 0; i < timeout*100; i++){
+        if (lastTransmission){
+            /* stopPinChangeIntr();
+            stopTimer(); */
+            retTransmission = lastTransmission;
+            lastTransmission = 0;
+            return retTransmission;
+        }
+    }
+    /* stopPinChangeIntr();
+    stopTimer(); */
+    return 0;
 }
